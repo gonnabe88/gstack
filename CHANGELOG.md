@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.1.0] - 2026-04-18
+
+### Fixed
+- **`/ship` no longer silently lets `VERSION` and `package.json` drift.** Before this fix, `/ship`'s Step 12 read and bumped only the `VERSION` file. Any downstream consumer that reads `package.json` (registry UIs, `bun pm view`, `npm publish`, future helpers) would see a stale semver, and because the idempotency check keyed on `VERSION` alone, the next `/ship` run couldn't detect it had drifted. Now Step 12 classifies into four states — FRESH, ALREADY_BUMPED, DRIFT_STALE_PKG, DRIFT_UNEXPECTED — detects drift in every direction, repairs it via a sync-only path that can't double-bump, and halts loudly when `VERSION` and `package.json` disagree in an ambiguous way.
+- **Hardened against malformed version strings.** `NEW_VERSION` is validated against the 4-digit semver pattern before any write, and the drift-repair path applies the same check to `VERSION` contents before propagating them into `package.json`. Trailing carriage returns and whitespace are stripped from both file reads. If `package.json` is invalid JSON, `/ship` stops loudly instead of silently rewriting a corrupted file.
+
+### For contributors
+- New test file at `test/ship-version-sync.test.ts` — 14 cases covering every branch of the new Step 12 logic, including the critical no-double-bump path (drift-repair must never call the normal bump action), trailing-CR regression, and invalid-semver repair rejection.
+- Review history on this fix: one round of `/plan-eng-review`, one round of `/codex` plan review (found a double-bump bug in the original design), one round of Claude adversarial subagent (found CRLF handling gap and unvalidated `REPAIR_VERSION`). All surfaced issues applied in-branch.
+
 ## [1.1.0.0] - 2026-04-18
 
 ### Added
