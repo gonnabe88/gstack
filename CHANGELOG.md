@@ -1,5 +1,100 @@
 # Changelog
 
+## [1.10.1.0] - 2026-04-23
+
+## **We tried to make Opus 4.7 faster with a prompt. Measurement said it got slower. Pulled the bullet.**
+
+gstack shipped a "Fan out explicitly" overlay nudge in `model-overlays/opus-4-7.md`
+back in v1.5.2.0. The idea: tell Opus 4.7 to emit multiple tool calls in one
+assistant turn instead of one per turn, so "read three files" takes one API
+round-trip instead of three. Sounded obvious. This release removes that
+bullet after measuring that it actively hurt performance, and ships the eval
+harness we used to prove it so you can measure your own overlay changes.
+
+### The numbers that matter
+
+Source: new `test/skill-e2e-overlay-harness.test.ts`, N=10 trials per arm per
+fixture, 40 trials per run, ~$3 per run. Pinned to `claude-opus-4-7` via
+Anthropic's published Agent SDK (`@anthropic-ai/claude-agent-sdk@0.2.117`)
+with `pathToClaudeCodeExecutable` set to the locally-installed `claude` binary
+(2.1.118). Metric: number of parallel `tool_use` blocks in the first assistant
+turn.
+
+| Prompt text in overlay | First-turn fanout rate (toy: read 3 files) | Lift vs baseline |
+|---|---|---|
+| No overlay (default Claude Code system prompt only) | **70%** (7/10) | baseline |
+| gstack's original "Fan out explicitly" nudge (v1.5.2.0 through v1.6.3.0) | 10% (1/10) | **-60%** |
+| Anthropic's own canonical `<use_parallel_tool_calls>` text from their parallel-tool-use docs | **0%** (0/10) | **-70%** |
+
+On a realistic multi-file audit prompt (`read app.ts + config.ts + README.md,
+glob src/*.ts, summarize`), Opus 4.7 never fanned out in the first turn at all,
+regardless of overlay. Zero of 20 trials. The nudge had nothing to grip.
+
+Total cost of the investigation: **$7** across three eval runs.
+
+### What this means for you
+
+If you ship system-prompt nudges for Claude, measure them. Anthropic's own
+published best-practice text dropped our fanout rate to zero. That's not a
+claim about Anthropic, it's a claim about measurement: the model, the SDK,
+the binary, and the context all move under the advice, and the advice sits
+still. The harness is in the repo now. Run
+`EVALS=1 EVALS_TIER=periodic bun test test/skill-e2e-overlay-harness.test.ts`.
+Three dollars per run.
+
+### Itemized changes
+
+#### Fixed
+
+- `model-overlays/opus-4-7.md` — removed the "Fan out explicitly" block. The
+  other three nudges (effort-match, batch questions, literal interpretation)
+  are untested and stay in for now. They're candidates for their own
+  measurement in a follow-up PR.
+
+#### Added
+
+- `test/skill-e2e-overlay-harness.test.ts` — periodic-tier eval that iterates a
+  typed fixture registry and runs A/B arms through `@anthropic-ai/claude-agent-sdk`.
+  Uses SDK preset `claude_code` so the arms include Claude Code's real system
+  prompt; overlay-ON appends the resolved overlay text. Saves per-trial raw
+  event streams for forensic recovery. Gated on both `EVALS=1` and
+  `EVALS_TIER=periodic`.
+- `test/fixtures/overlay-nudges.ts` — typed `OverlayFixture` registry with
+  strict validator. Adding a future nudge to measure = one fixture entry.
+  First two fixtures: `opus-4-7-fanout-toy` and `opus-4-7-fanout-realistic`.
+- `test/helpers/agent-sdk-runner.ts` — parametric SDK wrapper with explicit
+  `AgentSdkResult` types, process-level API concurrency semaphore, and
+  three-shape 429 retry (thrown error, result-message error, mid-stream
+  `SDKRateLimitEvent`). Binary pinning via `pathToClaudeCodeExecutable`.
+- `test/agent-sdk-runner.test.ts` — 36 free-tier unit tests covering happy
+  path, all three rate-limit shapes, persistent-429 `RateLimitExhaustedError`,
+  non-429 propagation, options propagation, concurrency cap, and every
+  validator rejection case.
+- `scripts/preflight-agent-sdk.ts` — 20-line sanity check that confirms the
+  SDK loads, `claude-opus-4-7` is a live API model, the `SDKMessage` event
+  shape matches assumptions, and the overlay resolver produces the expected
+  text. Run manually before paid runs if you suspect drift. Costs ~$0.013.
+- `@anthropic-ai/claude-agent-sdk@0.2.117` in `devDependencies`. Exact pin,
+  no caret — SDK event shapes can drift on minor versions.
+
+#### Changed
+
+- `scripts/resolvers/model-overlay.ts` — exported `readOverlay` so the eval
+  harness can resolve `{{INHERIT:claude}}` directives without synthesizing a
+  full `TemplateContext`.
+
+#### For contributors
+
+- `test/helpers/touchfiles.ts` — registered the new eval in both
+  `E2E_TOUCHFILES` (deps: `model-overlays/**`, `overlay-nudges.ts`, runner,
+  resolver) and `E2E_TIERS` (`periodic`). Passes the
+  `test/touchfiles.test.ts` completeness check.
+- The harness is deliberately parametric. Adding a second overlay nudge
+  measurement (for the remaining three nudges in `opus-4-7.md`, or any
+  future nudge in any overlay file) is a single entry in
+  `test/fixtures/overlay-nudges.ts`. Total incremental effort: ~15 minutes
+  per fixture.
+
 ## [1.10.0.0] - 2026-04-23
 
 ## **Plan reviews walk you through each issue again, and every question is now a real decision brief.**
