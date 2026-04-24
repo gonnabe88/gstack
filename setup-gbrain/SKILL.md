@@ -1,17 +1,19 @@
 ---
-name: health
+name: setup-gbrain
 preamble-tier: 2
 version: 1.0.0
 description: |
-  Code quality dashboard. Wraps existing project tools (type checker, linter,
-  test runner, dead code detector, shell linter), computes a weighted composite
-  0-10 score, and tracks trends over time. Use when: "health check",
-  "code quality", "how healthy is the codebase", "run all checks",
-  "quality score". (gstack)
+  Set up gbrain for this coding agent: install the CLI, initialize a
+  local PGLite or Supabase brain, register MCP, capture per-remote trust
+  policy. One command from zero to "gbrain is running, and this agent
+  can call it." Use when: "setup gbrain", "connect gbrain", "start
+  gbrain", "install gbrain", "configure gbrain for this machine". (gstack)
 triggers:
-  - code health check
-  - quality dashboard
-  - how healthy is codebase
+  - setup gbrain
+  - install gbrain
+  - connect gbrain
+  - start gbrain
+  - configure gbrain
 allowed-tools:
   - Bash
   - Read
@@ -62,7 +64,7 @@ _QUESTION_TUNING=$(~/.claude/skills/gstack/bin/gstack-config get question_tuning
 echo "QUESTION_TUNING: $_QUESTION_TUNING"
 mkdir -p ~/.gstack/analytics
 if [ "$_TEL" != "off" ]; then
-echo '{"skill":"health","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","repo":"'$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")'"}'  >> ~/.gstack/analytics/skill-usage.jsonl 2>/dev/null || true
+echo '{"skill":"setup-gbrain","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'","repo":"'$(basename "$(git rev-parse --show-toplevel 2>/dev/null)" 2>/dev/null || echo "unknown")'"}'  >> ~/.gstack/analytics/skill-usage.jsonl 2>/dev/null || true
 fi
 # zsh-compatible: use find instead of glob to avoid NOMATCH error
 for _PF in $(find ~/.gstack/analytics -maxdepth 1 -name '.pending-*' 2>/dev/null); do
@@ -87,7 +89,7 @@ else
   echo "LEARNINGS: 0"
 fi
 # Session timeline: record skill start (local-only, never sent anywhere)
-~/.claude/skills/gstack/bin/gstack-timeline-log '{"skill":"health","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
+~/.claude/skills/gstack/bin/gstack-timeline-log '{"skill":"setup-gbrain","event":"started","branch":"'"$_BRANCH"'","session":"'"$_SESSION_ID"'"}' 2>/dev/null &
 # Check if CLAUDE.md has routing rules
 _HAS_ROUTING="no"
 if [ -f CLAUDE.md ] && grep -q "## Skill routing" CLAUDE.md 2>/dev/null; then
@@ -893,7 +895,7 @@ Progress summaries must NEVER mutate git state — they are reporting, not commi
 
 **After the user answers.** Log it (non-fatal — best-effort):
 ```bash
-~/.claude/skills/gstack/bin/gstack-question-log '{"skill":"health","question_id":"<id>","question_summary":"<short>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"'"$_SESSION_ID"'"}' 2>/dev/null || true
+~/.claude/skills/gstack/bin/gstack-question-log '{"skill":"setup-gbrain","question_id":"<id>","question_summary":"<short>","category":"<approval|clarification|routing|cherry-pick|feedback-loop>","door_type":"<one-way|two-way>","options_count":N,"user_choice":"<key>","recommended":"<key>","session_id":"'"$_SESSION_ID"'"}' 2>/dev/null || true
 ```
 
 **Offer inline tune (two-way only, skip on one-way).** Add one line:
@@ -1022,297 +1024,424 @@ If a richer review report already exists, skip — review skills wrote it.
 
 PLAN MODE EXCEPTION — always allowed (it's the plan file).
 
-# /health -- Code Quality Dashboard
+# /setup-gbrain — Coding-Agent Onboarding for gbrain
 
-You are a **Staff Engineer who owns the CI dashboard**. You know that code quality
-isn't one metric -- it's a composite of type safety, lint cleanliness, test coverage,
-dead code, and script hygiene. Your job is to run every available tool, score the
-results, present a clear dashboard, and track trends so the team knows if quality
-is improving or slipping.
+You are setting up gbrain (https://github.com/garrytan/gbrain), a persistent
+knowledge base, on the user's local Mac so that this coding agent (typically
+Claude Code) can call it as both a CLI and an MCP tool.
 
-**HARD GATE:** Do NOT fix any issues. Produce the dashboard and recommendations only.
-The user decides what to act on.
+**Scope honesty:** This skill's MCP registration step (5a) uses
+`claude mcp add` and targets Claude Code specifically. Other local hosts
+(Cursor, Codex CLI, etc.) will still get the gbrain CLI on PATH — they can
+register `gbrain serve` in their own MCP config manually after setup.
+
+**Audience:** local-Mac users. openclaw/hermes agents typically run in cloud
+docker containers with their own gbrain; "sharing" a brain between them and
+local Claude Code is only possible through shared Postgres (Supabase).
 
 ## User-invocable
-When the user types `/health`, run this skill.
+When the user types `/setup-gbrain`, run this skill. Three shortcut modes:
+
+- `/setup-gbrain` — full flow (default)
+- `/setup-gbrain --repo` — only flip the per-remote policy for the current repo
+- `/setup-gbrain --switch` — only migrate the engine (PGLite ↔ Supabase)
+- `/setup-gbrain --resume-provision <ref>` — re-enter a previously interrupted
+  Supabase auto-provision at the polling step
+- `/setup-gbrain --cleanup-orphans` — list + delete in-flight Supabase projects
+
+Parse the invocation args yourself — these are prose hints to the skill, not
+implemented as a dispatcher binary.
 
 ---
 
-## Step 1: Detect Health Stack
-
-Read CLAUDE.md and look for a `## Health Stack` section. If found, parse the tools
-listed there and skip auto-detection.
-
-If no `## Health Stack` section exists, auto-detect available tools:
+## Step 1: Detect current state
 
 ```bash
-# Type checker
-[ -f tsconfig.json ] && echo "TYPECHECK: tsc --noEmit"
-
-# Linter
-[ -f biome.json ] || [ -f biome.jsonc ] && echo "LINT: biome check ."
-setopt +o nomatch 2>/dev/null || true
-ls eslint.config.* .eslintrc.* .eslintrc 2>/dev/null | head -1 | xargs -I{} echo "LINT: eslint ."
-[ -f .pylintrc ] || [ -f pyproject.toml ] && grep -q "pylint\|ruff" pyproject.toml 2>/dev/null && echo "LINT: ruff check ."
-
-# Test runner
-[ -f package.json ] && grep -q '"test"' package.json 2>/dev/null && echo "TEST: $(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf8')).scripts.test)" 2>/dev/null)"
-[ -f pyproject.toml ] && grep -q "pytest" pyproject.toml 2>/dev/null && echo "TEST: pytest"
-[ -f Cargo.toml ] && echo "TEST: cargo test"
-[ -f go.mod ] && echo "TEST: go test ./..."
-
-# Dead code
-command -v knip >/dev/null 2>&1 && echo "DEADCODE: knip"
-[ -f package.json ] && grep -q '"knip"' package.json 2>/dev/null && echo "DEADCODE: npx knip"
-
-# Shell linting
-command -v shellcheck >/dev/null 2>&1 && ls *.sh scripts/*.sh bin/*.sh 2>/dev/null | head -1 | xargs -I{} echo "SHELL: shellcheck"
-
-# GBrain presence (D6) — only report as a dimension if gbrain is actually
-# set up; otherwise skip so machines without gbrain aren't penalized.
-if command -v gbrain >/dev/null 2>&1 && [ -f "$HOME/.gbrain/config.json" ]; then
-  echo "GBRAIN: gbrain doctor --json (wrapped in timeout 5s)"
-fi
+~/.claude/skills/gstack/bin/gstack-gbrain-detect
 ```
 
-Use Glob to search for shell scripts:
-- `**/*.sh` (shell scripts in the repo)
+Capture the JSON output. It contains: `gbrain_on_path`, `gbrain_version`,
+`gbrain_config_exists`, `gbrain_engine`, `gbrain_doctor_ok`,
+`gstack_brain_sync_mode`, `gstack_brain_git`.
 
-After auto-detection, present the detected tools via AskUserQuestion:
+Skip downstream steps that are already done. Report the detected state in
+one line so the user knows what you found:
 
-"I detected these health check tools for this project:
+> "Detected: gbrain v0.18.2 on PATH, engine=postgres, doctor=ok,
+>  sync=artifacts-only. Nothing to install; jumping to the policy check."
 
-- Type check: `tsc --noEmit`
-- Lint: `biome check .`
-- Tests: `bun test`
-- Dead code: `knip`
-- Shell lint: `shellcheck *.sh`
+Branch on the `--repo`, `--switch`, `--resume-provision`, `--cleanup-orphans`
+invocation flags here and skip to the matching step.
 
-A) Looks right -- persist to CLAUDE.md and continue
-B) I need to adjust some tools (tell me which)
-C) Skip persistence -- just run these"
+---
 
-If the user chooses A or B (after adjustments), append or update a `## Health Stack`
-section in CLAUDE.md:
+## Step 2: Pick a path (AskUserQuestion)
+
+Only fire this if Step 1 shows no existing working config AND no shortcut
+flag was passed. The question title: "Where should your brain live?"
+
+Options (present based on detected state):
+
+- **1 — Supabase, I already have a connection string.** Cloud-agent users
+  whose openclaw/hermes provisioned one already. Paste the Session Pooler
+  URL from the Supabase dashboard (Settings → Database → Connection Pooler
+  → Session). *Trust-surface caveat to include in the prompt:* "Pasting this
+  URL gives your local Claude Code full read/write access to every page your
+  cloud agent can see. If that's not the trust level you want, pick PGLite
+  local instead and accept the brains are disjoint."
+- **2a — Supabase, auto-provision a new project.** You'll need a Supabase
+  Personal Access Token (~90 seconds). Best choice for a shared team brain.
+- **2b — Supabase, create manually.** Walk through supabase.com signup
+  yourself; paste the URL back when ready.
+- **3 — PGLite local.** Zero accounts, ~30 seconds. Isolated brain on this
+  Mac only. Best for try-first.
+- **Switch** (only if Step 1 detected an existing engine): "You already have
+  a `<engine>` brain. Migrate it to the other engine?" → runs
+  `gbrain migrate --to <other>` wrapped in `timeout 180s` (D9).
+
+Do NOT silently pick; fire the AskUserQuestion.
+
+---
+
+## Step 3: Install gbrain CLI (if missing)
+
+Only if `gbrain_on_path=false`:
+
+```bash
+~/.claude/skills/gstack/bin/gstack-gbrain-install
+```
+
+The installer runs D5 detect-first (probes `~/git/gbrain`, `~/gbrain` first),
+then D19 PATH-shadow validation (post-link `gbrain --version` must match
+install-dir `package.json`). On D19 failure the installer exits 3 with a
+clear remediation menu; surface the full output to the user and STOP. Do not
+continue the skill — the environment is broken until the user fixes PATH.
+
+---
+
+## Step 4: Initialize the brain
+
+Path-specific.
+
+### Path 1 (Supabase, existing URL)
+
+Source the secret-read helper, collect URL with `read -s` + redacted preview:
+
+```bash
+. ~/.claude/skills/gstack/bin/gstack-gbrain-lib.sh
+read_secret_to_env GBRAIN_POOLER_URL "Paste Session Pooler URL: " \
+  --echo-redacted 's#://[^@]*@#://***@#'
+```
+
+Then validate structurally:
+
+```bash
+printf '%s' "$GBRAIN_POOLER_URL" | ~/.claude/skills/gstack/bin/gstack-gbrain-supabase-verify -
+```
+
+If the verify exit code is 3 (direct-connection URL), the verifier's own
+message explains the fix; surface it and re-prompt for a Session Pooler URL.
+
+On success, hand off to gbrain via env var (D10, never argv):
+
+```bash
+GBRAIN_DATABASE_URL="$GBRAIN_POOLER_URL" gbrain init --non-interactive --json
+```
+
+Then `unset GBRAIN_POOLER_URL GBRAIN_DATABASE_URL` immediately. The URL is
+now persisted in `~/.gbrain/config.json` at mode 0600 by gbrain itself.
+
+### Path 2a (Supabase, auto-provision — D7)
+
+Show the D11 PAT scope disclosure verbatim BEFORE collecting the token:
+
+> *This Supabase Personal Access Token grants full read/write/delete access
+> to every project in your Supabase account, not just the `gbrain` one we're
+> about to create. Supabase doesn't currently support scoped tokens. We use
+> this PAT only to: create one project, poll it until healthy, read the
+> Session Pooler URL — then discard it from process memory. The token
+> remains valid on Supabase's side until you manually revoke it at
+> https://supabase.com/dashboard/account/tokens — we recommend revoking
+> immediately after setup completes.*
+
+Then:
+
+```bash
+. ~/.claude/skills/gstack/bin/gstack-gbrain-lib.sh
+read_secret_to_env SUPABASE_ACCESS_TOKEN "Paste PAT: "
+```
+
+Ask the D17 tier prompt via AskUserQuestion: "Which Supabase tier?" Present
+Free (2-project limit, pauses after 7d inactivity) vs Pro ($25/mo, no
+pauses, recommended for real use). Explain that tier is **org-level** (per
+the Management API contract) — user picks their org based on its current
+tier. Pro may require them to upgrade the org first at supabase.com.
+
+List orgs, pick one (AskUserQuestion if multiple):
+
+```bash
+orgs=$(~/.claude/skills/gstack/bin/gstack-gbrain-supabase-provision list-orgs --json)
+```
+
+If the `.orgs` array is empty, surface: "Your Supabase account has no
+organizations. Create one at https://supabase.com/dashboard, then re-run
+`/setup-gbrain`." STOP.
+
+Ask the user for a region (default `us-east-1`; valid values are the 18
+enum values in the Supabase Management API — list a few common ones, let
+them pick "Other" for a full list).
+
+Generate the DB password (never shown to the user):
+
+```bash
+export DB_PASS=$(openssl rand -base64 24)
+```
+
+Set up a SIGINT trap (D12 basic recovery):
+
+```bash
+trap 'echo ""; echo "gstack-gbrain: interrupted. In-flight ref: $INFLIGHT_REF"; \
+      echo "Resume: /setup-gbrain --resume-provision $INFLIGHT_REF"; \
+      echo "Delete: https://supabase.com/dashboard/project/$INFLIGHT_REF"; \
+      unset SUPABASE_ACCESS_TOKEN DB_PASS; exit 130' INT TERM
+```
+
+Create + wait + fetch:
+
+```bash
+result=$(~/.claude/skills/gstack/bin/gstack-gbrain-supabase-provision \
+  create gbrain "$REGION" "$ORG_SLUG" --json)
+INFLIGHT_REF=$(echo "$result" | jq -r .ref)
+~/.claude/skills/gstack/bin/gstack-gbrain-supabase-provision wait "$INFLIGHT_REF" --json
+pooler=$(~/.claude/skills/gstack/bin/gstack-gbrain-supabase-provision \
+  pooler-url "$INFLIGHT_REF" --json)
+GBRAIN_DATABASE_URL=$(echo "$pooler" | jq -r .pooler_url)
+export GBRAIN_DATABASE_URL
+gbrain init --non-interactive --json
+unset SUPABASE_ACCESS_TOKEN DB_PASS GBRAIN_DATABASE_URL INFLIGHT_REF
+trap - INT TERM
+```
+
+After success, emit the PAT revocation reminder:
+
+> "Setup complete. Revoke the PAT you pasted at
+> https://supabase.com/dashboard/account/tokens — we've already discarded
+> it from memory and don't need it again. The gbrain project will continue
+> working because it uses its own embedded database password."
+
+### Path 2b (Supabase, manual)
+
+Walk the user through the supabase.com steps:
+1. Login at https://supabase.com/dashboard
+2. Click "New Project," name it `gbrain`, pick a region, copy the generated
+   database password (you'll need it for paste-back? no — it's embedded in
+   the pooler URL we collect next)
+3. Wait ~2 min for the project to initialize
+4. Settings → Database → Connection Pooler → Session → copy the URL (port
+   6543)
+
+Then follow the same secret-read + verify + init flow as Path 1.
+
+### Path 3 (PGLite local)
+
+```bash
+gbrain init --pglite --json
+```
+
+Done. No network, no secrets.
+
+### Switch (from detect's existing-engine state)
+
+```bash
+# Going PGLite → Supabase, collect URL first (Path 1 flow), then:
+timeout 180s gbrain migrate --to supabase --url "$URL" --json
+# Going Supabase → PGLite:
+timeout 180s gbrain migrate --to pglite --json
+```
+
+If `timeout` returns 124 (exit code for timeout): surface D9 message
+("Migration didn't complete in 3 minutes — another gstack session may be
+holding a lock on the source brain. Close other workspaces and re-run
+`/setup-gbrain --switch`. Your original brain is untouched."). STOP.
+
+---
+
+## Step 5: Verify gbrain doctor
+
+```bash
+doctor=$(gbrain doctor --json)
+status=$(echo "$doctor" | jq -r .status)
+```
+
+If status is `ok` or `warnings`, proceed. Anything else → surface the full
+doctor output and STOP.
+
+---
+
+## Step 5a: Register gbrain as Claude Code MCP (D18)
+
+Only if `which claude` resolves. Ask: "Give Claude Code a typed tool surface
+for gbrain? (recommended yes)"
+
+If yes:
+
+```bash
+claude mcp add gbrain -- gbrain serve
+claude mcp list | grep gbrain  # verify
+```
+
+If `claude` is not on PATH: emit "MCP registration skipped — this skill is
+Claude-Code-targeted; register `gbrain serve` in your agent's MCP config
+manually." Continue to step 6.
+
+---
+
+## Step 6: Per-remote policy (D3 triad, gated repo-import)
+
+If we're in a git repo with an `origin` remote, check the policy:
+
+```bash
+current_tier=$(~/.claude/skills/gstack/bin/gstack-gbrain-repo-policy get)
+```
+
+Branches:
+- `read-write` → import this repo: `gbrain import "$(pwd)" --no-embed` then
+  `gbrain embed --stale &` in the background.
+- `read-only` → skip import entirely (this tier is enforced by the future
+  auto-import hook + by gbrain resolver injection, not here).
+- `deny` → do nothing.
+- `unset` → AskUserQuestion: "How should `<normalized-remote>` interact with
+  gbrain?"
+  - `read-write` — agent can search AND write new pages from this repo
+  - `read-only` — agent can search but never write
+  - `deny` — no interaction at all
+  - `skip-for-now` — don't persist, ask next time
+
+  On answer (other than skip-for-now):
+  ```bash
+  ~/.claude/skills/gstack/bin/gstack-gbrain-repo-policy set "$REMOTE" "$TIER"
+  ```
+  Then import iff `read-write`.
+
+If outside a git repo OR no origin remote: skip this step with a note.
+
+For `/setup-gbrain --repo` invocations, execute ONLY Step 6 and exit.
+
+---
+
+## Step 7: Offer gstack-brain-sync
+
+Separate AskUserQuestion: "Also sync your gstack session memory (learnings,
+plans, retros) to a private git repo that gbrain can index across machines?"
+
+Options:
+- Yes, full sync (everything allowlisted)
+- Yes, artifacts-only (plans, designs, retros — skip behavioral data)
+- No thanks
+
+If yes:
+
+```bash
+~/.claude/skills/gstack/bin/gstack-brain-init
+~/.claude/skills/gstack/bin/gstack-config set gbrain_sync_mode artifacts-only
+# or "full" if user picked yes-full
+```
+
+---
+
+## Step 8: Persist `## GBrain Configuration` in CLAUDE.md
+
+Find-and-replace (or append) this section in CLAUDE.md:
 
 ```markdown
-## Health Stack
-
-- typecheck: tsc --noEmit
-- lint: biome check .
-- test: bun test
-- deadcode: knip
-- shell: shellcheck *.sh scripts/*.sh
+## GBrain Configuration (configured by /setup-gbrain)
+- Engine: {pglite|postgres}
+- Config file: ~/.gbrain/config.json (mode 0600)
+- Setup date: {today}
+- MCP registered: {yes/no}
+- Memory sync: {off|artifacts-only|full}
+- Current repo policy: {read-write|read-only|deny|unset}
 ```
 
 ---
 
-## Step 2: Run Tools
-
-Run each detected tool. For each tool:
-
-1. Record the start time
-2. Run the command, capturing both stdout and stderr
-3. Record the exit code
-4. Record the end time
-5. Capture the last 50 lines of output for the report
+## Step 9: Smoke test
 
 ```bash
-# Example for each tool — run each independently
-START=$(date +%s)
-tsc --noEmit 2>&1 | tail -50
-EXIT_CODE=$?
-END=$(date +%s)
-echo "TOOL:typecheck EXIT:$EXIT_CODE DURATION:$((END-START))s"
+gbrain put_page --title "setup-gbrain smoke test" --tags "meta" \
+  <<<"Set up on $(date)"
+gbrain search "smoke test" | grep -i "setup-gbrain smoke test"
 ```
 
-Run tools sequentially (some may share resources or lock files). If a tool is not
-installed or not found, record it as `SKIPPED` with reason, not as a failure.
+Confirms the round trip. On failure, surface `gbrain doctor --json` output
+and STOP with a NEEDS_CONTEXT escalation.
 
 ---
 
-## Step 3: Score Each Category
+## `/setup-gbrain --cleanup-orphans` (D20)
 
-Score each category on a 0-10 scale using this rubric:
-
-| Category | Weight | 10 | 7 | 4 | 0 |
-|-----------|--------|------|-----------|------------|-----------|
-| Type check | 22% | Clean (exit 0) | <10 errors | <50 errors | >=50 errors |
-| Lint | 18% | Clean (exit 0) | <5 warnings | <20 warnings | >=20 warnings |
-| Tests | 28% | All pass (exit 0) | >95% pass | >80% pass | <=80% pass |
-| Dead code | 13% | Clean (exit 0) | <5 unused exports | <20 unused | >=20 unused |
-| Shell lint | 9% | Clean (exit 0) | <5 issues | >=5 issues | N/A (skip) |
-| GBrain (D6) | 10% | doctor=ok, queue<10, pushed <24h | doctor=warnings OR queue<100 OR pushed <72h | doctor broken OR queue>=100 OR pushed >=72h | N/A (gbrain not installed) |
-
-**Parsing tool output for counts:**
-- **tsc:** Count lines matching `error TS` in output.
-- **biome/eslint/ruff:** Count lines matching error/warning patterns. Parse the summary line if available.
-- **Tests:** Parse pass/fail counts from the test runner output. If the runner only reports exit code, use: exit 0 = 10, exit non-zero = 4 (assume some failures).
-- **knip:** Count lines reporting unused exports, files, or dependencies.
-- **shellcheck:** Count distinct findings (lines starting with "In ... line").
-
-**Composite score:**
-```
-composite = (typecheck_score * 0.22) + (lint_score * 0.18) + (test_score * 0.28) + (deadcode_score * 0.13) + (shell_score * 0.09) + (gbrain_score * 0.10)
-```
-
-If a category is skipped (tool not available — includes GBrain when gbrain
-is not installed), redistribute its weight proportionally among the
-remaining categories.
-
-**GBrain sub-score computation (D6):**
-
-```
-doctor_component: 10 if `gbrain doctor --json | jq -r .status` == "ok";
-                   7 if "warnings"; 0 otherwise (or command times out after 5s).
-queue_component:   10 if ~/.gstack/.brain-queue.jsonl has <10 lines;
-                    7 if 10-100; 0 if >=100 (suggests secret-scan rejections
-                    piling up). N/A if gbrain_sync_mode == off.
-push_component:    10 if (now - mtime of ~/.gstack/.brain-last-push) < 24h;
-                    7 if <72h; 0 if >=72h. N/A if gbrain_sync_mode == off.
-gbrain_score     = 0.5 * doctor_component + 0.3 * queue_component + 0.2 * push_component
-                   (redistribute 0.3 + 0.2 into doctor when sync_mode is off:
-                   gbrain_score = doctor_component in that case)
-```
-
-The `gbrain doctor --json` call MUST be wrapped in `timeout 5s` so a hung
-or misconfigured gbrain doesn't stall the entire /health dashboard.
-
----
-
-## Step 4: Present Dashboard
-
-Present results as a clear table:
-
-```
-CODE HEALTH DASHBOARD
-=====================
-
-Project: <project name>
-Branch:  <current branch>
-Date:    <today>
-
-Category      Tool              Score   Status     Duration   Details
-----------    ----------------  -----   --------   --------   -------
-Type check    tsc --noEmit      10/10   CLEAN      3s         0 errors
-Lint          biome check .      8/10   WARNING    2s         3 warnings
-Tests         bun test          10/10   CLEAN      12s        47/47 passed
-Dead code     knip               7/10   WARNING    5s         4 unused exports
-Shell lint    shellcheck        10/10   CLEAN      1s         0 issues
-GBrain        gbrain doctor     10/10   CLEAN      <1s        doctor=ok, queue=3, pushed 2h ago
-
-COMPOSITE SCORE: 9.1 / 10
-
-Duration: 23s total
-```
-
-Use these status labels:
-- 10: `CLEAN`
-- 7-9: `WARNING`
-- 4-6: `NEEDS WORK`
-- 0-3: `CRITICAL`
-
-If any category scored below 7, list the top issues from that tool's output:
-
-```
-DETAILS: Lint (3 warnings)
-  biome check . output:
-    src/utils.ts:42 — lint/complexity/noForEach: Prefer for...of
-    src/api.ts:18 — lint/style/useConst: Use const instead of let
-    src/api.ts:55 — lint/suspicious/noExplicitAny: Unexpected any
-```
-
----
-
-## Step 5: Persist to Health History
+Re-collect a PAT (Step 4 path-2a scope disclosure), then:
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
+# List user's Supabase projects (user has to pipe this through their own
+# shell to review; we don't rely on a stored PAT).
+export SUPABASE_ACCESS_TOKEN="<collected from read_secret_to_env>"
+projects=$(curl -s -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  https://api.supabase.com/v1/projects)
 ```
 
-Append one JSONL line to `~/.gstack/projects/$SLUG/health-history.jsonl`:
+Parse the response, identify any project named starting with `gbrain` whose
+`ref` doesn't match the user's active `~/.gbrain/config.json` pooler URL.
+For each orphan, AskUserQuestion per project: "Delete orphan project
+`<ref>` (`<name>`, created `<created_at>`)?" — NEVER batch; per-project
+confirm is a one-way door.
 
-```json
-{"ts":"2026-03-31T14:30:00Z","branch":"main","score":9.1,"typecheck":10,"lint":8,"test":10,"deadcode":7,"shell":10,"gbrain":10,"duration_s":23}
+On confirmed delete:
+```bash
+curl -s -X DELETE -H "Authorization: Bearer $SUPABASE_ACCESS_TOKEN" \
+  https://api.supabase.com/v1/projects/$REF
 ```
 
-Fields:
-- `ts` -- ISO 8601 timestamp
-- `branch` -- current git branch
-- `score` -- composite score (one decimal)
-- `typecheck`, `lint`, `test`, `deadcode`, `shell`, `gbrain` -- individual category scores (integer 0-10)
-- `duration_s` -- total time for all tools in seconds
+Never delete the active brain without a second explicit confirmation.
 
-If a category was skipped, set its value to `null`. Pre-D6 history entries
-won't have a `gbrain` field — treat them as `null` for trend comparison
-and start new tracking from the first post-D6 run.
+At end: `unset SUPABASE_ACCESS_TOKEN`. Revocation reminder.
 
 ---
 
-## Step 6: Trend Analysis + Recommendations
+## Telemetry (D4)
 
-Read the last 10 entries from `~/.gstack/projects/$SLUG/health-history.jsonl` (if the
-file exists and has prior entries).
+The preamble's Telemetry block logs skill success/failure at exit. When
+emitting the event, add these enumerated categorical values to the
+telemetry payload (SAFE — no free-form secrets, never the URL or PAT):
 
-```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG
-tail -10 ~/.gstack/projects/$SLUG/health-history.jsonl 2>/dev/null || echo "NO_HISTORY"
-```
+- `scenario`: `supabase-existing` | `supabase-auto-provision` |
+  `supabase-manual` | `pglite-local` | `switch-to-supabase` |
+  `switch-to-pglite` | `repo-flip-only` | `cleanup-orphans` |
+  `resume-provision`
+- `install_performed`: `yes` | `no` (D5 reuse) | `skipped` (pre-existing)
+- `mcp_registered`: `yes` | `no` | `claude-missing`
+- `trust_tier_set`: `read-write` | `read-only` | `deny` |
+  `skip-for-now` | `n/a` (outside git repo)
 
-**If prior entries exist, show the trend:**
-
-```
-HEALTH TREND (last 5 runs)
-==========================
-Date          Branch         Score   TC   Lint  Test  Dead  Shell  GBrain
-----------    -----------    -----   --   ----  ----  ----  -----  ------
-2026-03-28    main           9.4     10   9     10    8     10     10
-2026-03-29    feat/auth      8.8     10   7     10    7     10     10
-2026-03-30    feat/auth      8.2     10   6     9     7     10      7
-2026-03-31    feat/auth      9.1     10   8     10    7     10     10
-
-Trend: IMPROVING (+0.9 since last run)
-```
-
-**If score dropped vs the previous run:**
-1. Identify WHICH categories declined
-2. Show the delta for each declining category
-3. Correlate with tool output -- what specific errors/warnings appeared?
-
-```
-REGRESSIONS DETECTED
-  Lint: 9 -> 6 (-3) — 12 new biome warnings introduced
-    Most common: lint/complexity/noForEach (7 instances)
-  Tests: 10 -> 9 (-1) — 2 test failures
-    FAIL src/auth.test.ts > should validate token expiry
-    FAIL src/auth.test.ts > should reject malformed JWT
-```
-
-**Health improvement suggestions (always show these):**
-
-Prioritize suggestions by impact (weight * score deficit):
-
-```
-RECOMMENDATIONS (by impact)
-============================
-1. [HIGH]  Fix 2 failing tests (Tests: 9/10, weight 30%)
-   Run: bun test --verbose to see failures
-2. [MED]   Address 12 lint warnings (Lint: 6/10, weight 20%)
-   Run: biome check . --write to auto-fix
-3. [LOW]   Remove 4 unused exports (Dead code: 7/10, weight 15%)
-   Run: knip --fix to auto-remove
-```
-
-Rank by `weight * (10 - score)` descending. Only show categories below 10.
+Never pass `SUPABASE_ACCESS_TOKEN`, `DB_PASS`, `GBRAIN_POOLER_URL`,
+`GBRAIN_DATABASE_URL`, or any `postgresql://` substring to the telemetry
+invocation. The CI grep test in `test/skill-validation.test.ts` enforces
+this at build time.
 
 ---
 
 ## Important Rules
 
-1. **Wrap, don't replace.** Run the project's own tools. Never substitute your own analysis for what the tool reports.
-2. **Read-only.** Never fix issues. Present the dashboard and let the user decide.
-3. **Respect CLAUDE.md.** If `## Health Stack` is configured, use those exact commands. Do not second-guess.
-4. **Skipped is not failed.** If a tool isn't available, skip it gracefully and redistribute weight. Do not penalize the score.
-5. **Show raw output for failures.** When a tool reports errors, include the actual output (tail -50) so the user can act on it without re-running.
-6. **Trends require history.** On first run, say "First health check -- no trend data yet. Run /health again after making changes to track progress."
-7. **Be honest about scores.** A codebase with 100 type errors and all tests passing is not healthy. The composite score should reflect reality.
+- **One rule for every secret.** PAT, DB_PASS, pooler URL: env-var only,
+  never argv, never logged, never persisted to disk by us. The only file
+  that holds the pooler URL long-term is `~/.gbrain/config.json`, written
+  by gbrain's own `init` at mode 0600 — that's gbrain's discipline, not
+  ours.
+- **STOP points are hard.** Gbrain doctor not healthy, D19 PATH shadow, D9
+  migrate timeout, smoke test failure — each is a STOP. Do not paper over.
+- **Concurrent-run lock.** At skill start, `mkdir ~/.gstack/.setup-gbrain.lock.d`
+  (atomic). If the mkdir fails, abort with: "Another `/setup-gbrain` instance
+  is running. Wait for it, or `rm -rf ~/.gstack/.setup-gbrain.lock.d` if
+  you're sure it's stale." Release on normal exit AND in the SIGINT trap.
+- **CLAUDE.md is the audit trail.** Always update it in Step 8 after a
+  successful setup.
