@@ -367,6 +367,101 @@ describe('runAgentSdkTest — options propagation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// canUseTool extension (D10 CEO / D4 eng)
+// ---------------------------------------------------------------------------
+
+describe('runAgentSdkTest — canUseTool extension', () => {
+  test('permissionMode flips to "default" when canUseTool is supplied', async () => {
+    freshSem();
+    const stub: StubConfig = {
+      streams: [[systemInit(), assistantTurn([{ type: 'text', text: 'ok' }]), resultSuccess()]],
+      calls: [],
+    };
+    await runAgentSdkTest({
+      ...BASE_OPTS,
+      queryProvider: makeStubProvider(stub),
+      canUseTool: async (_toolName, input) => ({ behavior: 'allow', updatedInput: input }),
+    });
+    const opts = stub.calls[0]!.options!;
+    expect(opts.permissionMode).toBe('default');
+    expect(opts.allowDangerouslySkipPermissions).toBe(false);
+  });
+
+  test('permissionMode stays "bypassPermissions" when canUseTool is NOT supplied', async () => {
+    freshSem();
+    const stub: StubConfig = {
+      streams: [[systemInit(), assistantTurn([{ type: 'text', text: 'ok' }]), resultSuccess()]],
+      calls: [],
+    };
+    await runAgentSdkTest({
+      ...BASE_OPTS,
+      queryProvider: makeStubProvider(stub),
+    });
+    const opts = stub.calls[0]!.options!;
+    expect(opts.permissionMode).toBe('bypassPermissions');
+    expect(opts.allowDangerouslySkipPermissions).toBe(true);
+  });
+
+  test('canUseTool callback reaches the SDK options', async () => {
+    freshSem();
+    const stub: StubConfig = {
+      streams: [[systemInit(), assistantTurn([{ type: 'text', text: 'ok' }]), resultSuccess()]],
+      calls: [],
+    };
+    const cb = async (_toolName: string, input: Record<string, unknown>) => ({
+      behavior: 'allow' as const,
+      updatedInput: input,
+    });
+    await runAgentSdkTest({
+      ...BASE_OPTS,
+      queryProvider: makeStubProvider(stub),
+      canUseTool: cb,
+    });
+    const opts = stub.calls[0]!.options! as Options & { canUseTool?: unknown };
+    expect(typeof opts.canUseTool).toBe('function');
+  });
+
+  test('AskUserQuestion is auto-added to allowedTools when canUseTool is supplied', async () => {
+    freshSem();
+    const stub: StubConfig = {
+      streams: [[systemInit(), assistantTurn([{ type: 'text', text: 'ok' }]), resultSuccess()]],
+      calls: [],
+    };
+    await runAgentSdkTest({
+      ...BASE_OPTS,
+      allowedTools: ['Read', 'Grep'], // explicitly omits AskUserQuestion
+      queryProvider: makeStubProvider(stub),
+      canUseTool: async (_toolName, input) => ({ behavior: 'allow', updatedInput: input }),
+    });
+    const opts = stub.calls[0]!.options!;
+    expect(opts.allowedTools).toContain('AskUserQuestion');
+    expect(opts.tools).toContain('AskUserQuestion');
+  });
+
+  test('AskUserQuestion is NOT auto-added when canUseTool is absent', async () => {
+    freshSem();
+    const stub: StubConfig = {
+      streams: [[systemInit(), assistantTurn([{ type: 'text', text: 'ok' }]), resultSuccess()]],
+      calls: [],
+    };
+    await runAgentSdkTest({
+      ...BASE_OPTS,
+      allowedTools: ['Read', 'Grep'],
+      queryProvider: makeStubProvider(stub),
+    });
+    const opts = stub.calls[0]!.options!;
+    expect(opts.allowedTools).not.toContain('AskUserQuestion');
+  });
+
+  test('passThroughNonAskUserQuestion helper returns allow+updatedInput', async () => {
+    const { passThroughNonAskUserQuestion } = await import('../test/helpers/agent-sdk-runner');
+    const result = passThroughNonAskUserQuestion('Read', { file_path: '/tmp/x' });
+    expect(result.behavior).toBe('allow');
+    expect(result.updatedInput).toEqual({ file_path: '/tmp/x' });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Rate-limit retry (three shapes)
 // ---------------------------------------------------------------------------
 

@@ -31,6 +31,7 @@ import {
   type PermissionMode,
   type SettingSource,
   type Options,
+  type CanUseTool,
 } from '@anthropic-ai/claude-agent-sdk';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -111,6 +112,43 @@ export interface RunAgentSdkOptions {
    * retries reuse the original workingDirectory (fine for read-only tests).
    */
   onRetry?: (freshDir: string) => void;
+  /**
+   * Optional canUseTool callback. When supplied, the harness flips
+   * permissionMode from 'bypassPermissions' to 'default' so the SDK actually
+   * routes tool-use approval decisions through the callback. Without this
+   * flip, bypassPermissions short-circuits the callback and tests that want
+   * to assert on AskUserQuestion content silently pass without asserting.
+   *
+   * Callback contract matches the SDK: fires on every tool-use approval
+   * request and on AskUserQuestion invocations. For non-AskUserQuestion
+   * tools that tests don't care about, use `passThroughNonAskUserQuestion`
+   * to auto-allow them.
+   */
+  canUseTool?: CanUseTool;
+}
+
+/**
+ * Pass-through helper: auto-allows any tool_use that isn't AskUserQuestion.
+ * Most plan-mode handshake tests only care about the handshake AskUserQuestion;
+ * every other tool (Read, Grep, Bash, Write, Edit, ExitPlanMode) should just
+ * run. Compose with a test-specific AskUserQuestion handler:
+ *
+ *   canUseTool: async (toolName, input, options) => {
+ *     if (toolName === 'AskUserQuestion') {
+ *       // custom assertions + canned answer
+ *       return { behavior: 'allow', updatedInput: { questions: input.questions, answers: {...} } };
+ *     }
+ *     return passThroughNonAskUserQuestion(toolName, input);
+ *   }
+ */
+export function passThroughNonAskUserQuestion(
+  toolName: string,
+  input: Record<string, unknown>,
+): { behavior: 'allow'; updatedInput: Record<string, unknown> } {
+  // SDK requires an allow response to include updatedInput — pass the original
+  // input through unchanged so the tool runs as the model intended.
+  void toolName;
+  return { behavior: 'allow', updatedInput: input };
 }
 
 export class RateLimitExhaustedError extends Error {
@@ -287,19 +325,37 @@ export async function runAgentSdkTest(
     let terminalResult: SDKResultMessage | null = null;
 
     try {
+      // When canUseTool is supplied, the SDK must route tool-use approval
+      // decisions through the callback. bypassPermissions short-circuits
+      // that. Flip to 'default' mode so canUseTool actually fires. Tests
+      // that want AskUserQuestion interception without this flip would
+      // silently auto-pass — the exact testability gap D14/D4-eng fix.
+      const hasCanUseTool = typeof opts.canUseTool === 'function';
+      const resolvedPermissionMode: PermissionMode =
+        opts.permissionMode ?? (hasCanUseTool ? 'default' : 'bypassPermissions');
+
+      // When canUseTool is supplied, ensure AskUserQuestion is in the allowed
+      // tools list. Without it, Claude can't invoke AskUserQuestion at all
+      // and the callback never has a chance to fire on it.
+      const baseTools = opts.allowedTools ?? ['Read', 'Glob', 'Grep', 'Bash'];
+      const resolvedTools =
+        hasCanUseTool && !baseTools.includes('AskUserQuestion')
+          ? [...baseTools, 'AskUserQuestion']
+          : baseTools;
+
       const sdkOpts: Options = {
         model,
         cwd: opts.workingDirectory,
         maxTurns: opts.maxTurns ?? 5,
-        tools: opts.allowedTools ?? ['Read', 'Glob', 'Grep', 'Bash'],
+        tools: resolvedTools,
         disallowedTools: opts.disallowedTools,
-        allowedTools: opts.allowedTools ?? ['Read', 'Glob', 'Grep', 'Bash'],
-        permissionMode: opts.permissionMode ?? 'bypassPermissions',
-        allowDangerouslySkipPermissions:
-          (opts.permissionMode ?? 'bypassPermissions') === 'bypassPermissions',
+        allowedTools: resolvedTools,
+        permissionMode: resolvedPermissionMode,
+        allowDangerouslySkipPermissions: resolvedPermissionMode === 'bypassPermissions',
         settingSources: opts.settingSources ?? [],
         env: opts.env,
         pathToClaudeCodeExecutable: opts.pathToClaudeCodeExecutable,
+        ...(hasCanUseTool ? { canUseTool: opts.canUseTool } : {}),
       };
       // Empty bare string means "omit entirely" (SDK runs with no override).
       // Any object or non-empty string is passed through.

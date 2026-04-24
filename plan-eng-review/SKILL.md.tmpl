@@ -1,6 +1,7 @@
 ---
 name: plan-eng-review
 preamble-tier: 3
+interactive: true
 version: 1.0.0
 description: |
   Eng manager-mode plan review. Lock in the execution plan — architecture,
