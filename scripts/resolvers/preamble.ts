@@ -37,6 +37,9 @@ import { generateWritingStyleMigration } from './preamble/generate-writing-style
 // Host-specific instructions
 import { generateBrainHealthInstruction } from './preamble/generate-brain-health-instruction';
 
+// GBrain cross-machine sync (runs at skill start; end-side handled in completion-status)
+import { generateBrainSyncBlock } from './preamble/generate-brain-sync-block';
+
 // Behavioral / voice
 import { generateVoiceDirective } from './preamble/generate-voice-directive';
 
@@ -84,6 +87,7 @@ export function generatePreamble(ctx: TemplateContext): string {
     generateVendoringDeprecation(ctx),
     generateSpawnedSessionCheck(),
     generateBrainHealthInstruction(ctx),
+    generateBrainSyncBlock(ctx),
     generateModelOverlay(ctx),
     generateVoiceDirective(tier),
     ...(tier >= 2 ? [
