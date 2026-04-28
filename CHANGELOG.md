@@ -1,5 +1,54 @@
 # Changelog
 
+## [1.16.0.0] - 2026-04-28
+
+## **Paired-agent tunnel allowlist now matches what the docs already promised. Catch-22 resolved, gate is unit-testable.**
+
+The visible bug: a paired remote agent over the ngrok tunnel hit 403s on `newtab`, `tabs`, `goto-on-existing-tab`, and a chain of other commands the operator docs claimed worked. The hidden bug: the v1.6.0.0 `TUNNEL_COMMANDS` allowlist was set at 17 entries while `docs/REMOTE_BROWSER_ACCESS.md`, `browse/src/cli.ts:546-586`, and the operator-facing instruction blocks all documented 26. The shipped allowlist drifted from the design intent silently for releases. This release closes the gap: 9 commands added (`newtab`, `tabs`, `back`, `forward`, `reload`, `snapshot`, `fill`, `url`, `closetab`), each bounded by the existing per-tab ownership check at `server.ts:613-624`. Scoped tokens default to `tabPolicy: 'own-only'`, so a paired agent still can't navigate, fill, or close on tabs it doesn't own — same isolation as before, just covering more verbs.
+
+### The numbers that matter
+
+Branch totals come from `git diff --shortstat origin/main..HEAD`. Test counts come from `bun test browse/test/dual-listener.test.ts browse/test/tunnel-gate-unit.test.ts browse/test/pair-agent-tunnel-eval.test.ts browse/test/pair-agent-e2e.test.ts` against the merged tree.
+
+| Metric | Δ |
+|---|---|
+| Tunnel allowlist size | **17 → 26 commands** (+53%) |
+| Catch-22 resolution | `newtab` → `goto` → `back` chain works for the first time |
+| Gate testability | inline regex check → **pure exported `canDispatchOverTunnel()`** function |
+| New unit-test coverage | **53 expects** in `tunnel-gate-unit.test.ts` (allowed, blocked, null/undefined/non-string, alias canonicalization) |
+| New behavioral coverage | **4 tests** in `pair-agent-tunnel-eval.test.ts` running BOTH listeners locally (no ngrok) |
+| Source-level guard | exact-set equality against the 26-command literal + ownership-exemption regex |
+| All free tests | **69 pass / 0 fail** on the four touched test files |
+| Codex review passes | **2 outside-voice rounds** during plan mode, 6 of 7 findings incorporated |
+
+### What this means for users running paired agents
+
+Three things change immediately. **First**, paired agents can actually open and drive their own tab without hitting the catch-22 the prior allowlist created. `newtab` succeeds (the ownership-exemption at `server.ts:613` was always there, but the allowlist gated the entry); `goto`, `back`, `forward`, `reload`, `fill`, `closetab` all work on the just-created tab; `snapshot`, `url`, `tabs` give the agent the read-side surface needed to be useful. **Second**, the tunnel-surface gate is unit-testable now — `canDispatchOverTunnel(command)` is pure, exported from `browse/src/server.ts`, and covered by 53 expects. A future refactor that decouples the allowlist literal from the gate logic fails a free test in milliseconds. **Third**, `pair-agent-tunnel-eval.test.ts` exercises the gate end-to-end with BOTH the local and tunnel listeners bound on 127.0.0.1 (no ngrok required) so the routing decision — "this request hit the tunnel listener, run the gate; this one hit the local listener, skip the gate" — is asserted on every PR. The new `BROWSE_TUNNEL_LOCAL_ONLY=1` env var binds the second listener locally without invoking ngrok, gated to no-op outside test mode. Production tunnel still requires `BROWSE_TUNNEL=1` + a valid `NGROK_AUTHTOKEN`.
+
+### Itemized changes
+
+#### Added
+
+- 9 new commands in `browse/src/server.ts:111-120` `TUNNEL_COMMANDS` set: `newtab`, `tabs`, `back`, `forward`, `reload`, `snapshot`, `fill`, `url`, `closetab`. The set is now exported so tests can reference the literal directly.
+- `canDispatchOverTunnel(command: string | undefined | null): boolean` in `browse/src/server.ts` — pure exported function. Handles non-string input, runs `canonicalizeCommand` for alias resolution, returns `TUNNEL_COMMANDS.has(canonical)`.
+- `BROWSE_TUNNEL_LOCAL_ONLY=1` env var in `browse/src/server.ts:2080-2104`. Test-only sibling branch to `BROWSE_TUNNEL=1` that binds the second `Bun.serve` listener via `makeFetchHandler('tunnel')` without invoking ngrok. Persists `tunnelLocalPort` to the state file for the eval to read.
+- `browse/test/tunnel-gate-unit.test.ts`: 53 expects covering all 26 allowed commands, 20 blocked commands (pair, unpair, cookies, setup, launch, restart, stop, tunnel-start, token-mint, etc.), null/undefined/empty/non-string defensive handling, and alias canonicalization (e.g. `set-content` resolves to `load-html` and is correctly rejected since `load-html` isn't tunnel-allowed).
+- `browse/test/pair-agent-tunnel-eval.test.ts`: 4 behavioral tests that spawn the daemon under `BROWSE_HEADLESS_SKIP=1 BROWSE_TUNNEL_LOCAL_ONLY=1`, bind both listeners on 127.0.0.1, mint a scoped token via the existing `/pair` → `/connect` ceremony, and assert: (1) `newtab` over the tunnel passes the gate; (2) `pair` over the tunnel 403s with `disallowed_command:pair` AND writes a fresh denial-log entry to `~/.gstack/security/attempts.jsonl`; (3) `pair` over the local listener does NOT trigger the tunnel gate; (4) regression test for the catch-22 — `newtab` followed by `goto` on the resulting tab does not 403 with `Tab not owned by your agent`.
+
+#### Changed
+
+- `browse/test/dual-listener.test.ts`: must-include + must-exclude assertions replaced with one exact-set-equality test against the 26-command literal. The intersection-only style of the prior tests let new commands sneak into the source without a corresponding test update — the bidirectional check catches it both ways. Added a regex assertion that the `command !== 'newtab'` ownership-exemption clause at `server.ts:613` still exists (catches refactors that re-introduce the catch-22 from the other side).
+- `browse/test/dual-listener.test.ts`: `/command` handler test updated to assert the inline `TUNNEL_COMMANDS.has(cmd)` check is now `canDispatchOverTunnel(body?.command)` — proves the gate is delegated to the pure function and not duplicated.
+- `docs/REMOTE_BROWSER_ACCESS.md:35,168`: bumped "17-command allowlist" to "26-command allowlist". Corrected the denied-commands list (removed `eval`, which IS in the allowlist; the prior doc was wrong).
+- `CLAUDE.md`: bumped the transport-layer security section's "17-command browser-driving allowlist" reference to "26-command".
+
+#### For contributors
+
+- The plan was reviewed under `/plan-eng-review` plus 2 sequential codex outside-voice passes during plan mode. Round-1 codex caught a doc-target mistake (we were going to update `SIDEBAR_MESSAGE_FLOW.md` instead of `REMOTE_BROWSER_ACCESS.md`) and a wrong-layer test design. Round-2 codex caught that the round-1 correction was still wrong (the chosen test harness only binds the local listener) AND that the docs promised 6 more commands than the allowlist had. All 6 of 7 substantive findings landed in the implementation; the 7th (a pre-existing `/pair-agent` `/health` probe mismatch at `cli.ts:656-668`) is logged as out of scope.
+- One known accepted risk: `tabs` over the tunnel returns metadata for ALL tabs in the browser, not just tabs the agent owns. The user authored the trust relationship when they paired the agent, the agent already can't read CONTENT of unowned tabs (write commands blocked, the active tab can't be switched without a `tab <id>` command that's NOT in the allowlist), and tab IDs already leak via the 403 `hint` field on disallowed `goto`. Codex noted that tightening this requires touching the ownership gate itself (the gate falls back to `getActiveTabId()` BEFORE dispatch in `server.ts:603-614`), which is materially out of scope for a catch-22 fix. Logged in the plan failure-mode table as accepted.
+
+
+
 ## [1.15.0.0] - 2026-04-26
 
 ## **Real-PTY test harness ships. 11 plan-mode E2E tests, 23 unit tests, and 50K fewer tokens per invocation.**
