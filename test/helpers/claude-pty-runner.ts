@@ -133,9 +133,104 @@ export function isTrustDialogVisible(visible: string): boolean {
   return visible.includes('trust this folder');
 }
 
-/** Detect plan-mode's native "ready to execute" confirmation. */
+/**
+ * Detect plan-mode's native "ready to execute" confirmation. Tests both the
+ * spaced and whitespace-collapsed forms because stripAnsi removes cursor-
+ * positioning escapes (e.g. `\x1b[40C`) that render visually as spaces but
+ * leave no character behind — so "ready to execute" can come through as
+ * "readytoexecute" depending on the rendering path.
+ */
 export function isPlanReadyVisible(visible: string): boolean {
-  return /ready to execute|Would you like to proceed/i.test(visible);
+  if (/ready to execute|Would you like to proceed/i.test(visible)) return true;
+  const collapsed = visible.replace(/\s+/g, '');
+  return /readytoexecute|Wouldyouliketoproceed/i.test(collapsed);
+}
+
+/**
+ * Detect the AUTO_DECIDE preamble template firing. The model prints
+ * "Auto-decided <summary> → <option> (your preference). Change with /plan-tune."
+ * when it short-circuits an AskUserQuestion via the question-tuning resolver
+ * (`scripts/resolvers/question-tuning.ts:26`). The "Auto-decided ..." stem +
+ * "(your preference)" tail combination is the tightest signal. Whitespace-
+ * collapsed forms covered for the same TTY-rendering reason as
+ * isPlanReadyVisible.
+ */
+export function isAutoDecidedVisible(visible: string): boolean {
+  const stemMatch =
+    /Auto-decided\b/i.test(visible) || /Auto-decided/i.test(visible.replace(/\s+/g, ''));
+  if (!stemMatch) return false;
+  if (/\(your preference\)/i.test(visible)) return true;
+  return /\(yourpreference\)/i.test(visible.replace(/\s+/g, ''));
+}
+
+/**
+ * Extract the plan file path from rendered TTY output. Plan-mode's native
+ * confirmation includes one of these formats near the "Ready to execute?"
+ * prompt:
+ *   - `Plan saved to: /path/to/plan.md`
+ *   - `Plan file: /path/to/plan.md`
+ *   - `ctrl-g to edit in VSCode · ~/.claude/plans/<name>.md`
+ *
+ * stripAnsi may collapse whitespace via cursor-positioning escape removal,
+ * so the regex tolerates variable spacing. Returns the resolved absolute
+ * path with `~` expanded, or null if no path was rendered.
+ *
+ * Used by v1.22 AskUserQuestion-blocked regression tests to read the plan
+ * file post-`plan_ready` and verify it contains a decisions section, which
+ * distinguishes the legitimate fallback flow ("write decision brief into
+ * plan file") from the silent-skip regression ("write a plan that didn't
+ * surface any decisions").
+ */
+export function extractPlanFilePath(visible: string): string | null {
+  // Patterns checked in order of specificity. Each captures the .md path.
+  // The visible buffer may have stripAnsi-collapsed whitespace ("yet at" can
+  // become "yetat"), so the captured path MUST start at a clear path-anchor
+  // character: `~/`, `/Users/`, `/home/`, `/var/`, or `/tmp/`. Anchoring on
+  // these prefixes prevents earlier non-whitespace characters from being
+  // glommed into the path (real bug seen in the wild: `yetat/Users/...`).
+  const PATH_ANCHOR = '(~\\/|\\/Users\\/|\\/home\\/|\\/var\\/|\\/tmp\\/|\\.\\/)';
+  const patterns: RegExp[] = [
+    new RegExp(`Plan\\s*saved\\s*to\\s*:?\\s*(${PATH_ANCHOR}\\S+\\.md)`, 'i'),
+    new RegExp(`Plan\\s*file\\s*:?\\s*(${PATH_ANCHOR}\\S+\\.md)`, 'i'),
+    new RegExp(`·\\s*(${PATH_ANCHOR}\\S*\\.claude\\/plans\\/\\S+\\.md)`, 'i'),
+    // Fallback: any path-anchored reference to a .claude/plans .md file.
+    new RegExp(`(${PATH_ANCHOR}\\S*\\.claude\\/plans\\/[\\w-]+\\.md)`, 'i'),
+  ];
+  for (const p of patterns) {
+    const m = visible.match(p);
+    if (m && m[1]) {
+      let raw = m[1];
+      // Strip trailing punctuation that some patterns may capture.
+      raw = raw.replace(/\.+$/, '.md').replace(/\.md\.+$/, '.md');
+      // Tilde expansion to absolute path.
+      if (raw.startsWith('~')) {
+        const home = process.env.HOME ?? '';
+        raw = home + raw.slice(1);
+      }
+      return raw;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read a plan file written by a plan-mode skill and verify it contains a
+ * "decisions" section — evidence the skill surfaced the decisions it was
+ * supposed to gate on, even when AskUserQuestion is --disallowedTools and
+ * the model used the plan-file fallback flow instead of a numbered prompt.
+ *
+ * Accepts any `## Decisions ...` heading (the canonical form from the
+ * preamble is `## Decisions to confirm`, but small variants like
+ * `## Decisions needed` or `## Decisions for review` are common). Returns
+ * false if the file is unreadable, missing, or has no decisions section.
+ */
+export function planFileHasDecisionsSection(planFile: string): boolean {
+  try {
+    const content = fs.readFileSync(planFile, 'utf-8');
+    return /^##\s+Decisions\b/im.test(content);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -359,6 +454,7 @@ export function optionsSignature(
  */
 export type ClassifyResult =
   | { outcome: 'silent_write'; summary: string }
+  | { outcome: 'auto_decided'; summary: string }
   | { outcome: 'plan_ready'; summary: string }
   | { outcome: 'asked'; summary: string }
   | null;
@@ -387,6 +483,17 @@ export function classifyVisible(visible: string): ClassifyResult {
         summary: `Write/Edit to ${target} fired before any AskUserQuestion`,
       };
     }
+  }
+  // 'auto_decided' must beat 'plan_ready': when AUTO_DECIDE fires upstream of
+  // plan-ready, both signals are visible by the time the polling loop checks.
+  // The annotation text is the more informative outcome — it explains WHY
+  // we got to plan_ready without surfacing the question.
+  if (isAutoDecidedVisible(visible)) {
+    return {
+      outcome: 'auto_decided',
+      summary:
+        'skill auto-decided an AskUserQuestion via the AUTO_DECIDE preamble (the user never saw the prompt)',
+    };
   }
   if (isPlanReadyVisible(visible)) {
     return {
@@ -903,22 +1010,38 @@ export async function invokeAndObserve(
 export interface PlanSkillObservation {
   /**
    * What happened first. One of:
-   *  - 'asked'      — skill emitted a numbered-option prompt (its Step 0
-   *                   AskUserQuestion or the routing-injection prompt)
-   *  - 'plan_ready' — claude wrote a plan and emitted its native
-   *                   "Ready to execute" confirmation
+   *  - 'asked'        — skill emitted a numbered-option prompt (its Step 0
+   *                     AskUserQuestion or the routing-injection prompt)
+   *  - 'auto_decided' — visible TTY shows "Auto-decided ... → ..." (the
+   *                     AUTO_DECIDE preamble template fired). Distinguishes
+   *                     "the regression we're tracking" (auto-mode silently
+   *                     auto-deciding questions the user wanted to see) from
+   *                     "skill legitimately reached plan_ready". Detected
+   *                     before plan_ready/silent_write so the auto-decide
+   *                     evidence wins when both are present.
+   *  - 'plan_ready'   — claude wrote a plan and emitted its native
+   *                     "Ready to execute" confirmation
    *  - 'silent_write' — a Write/Edit landed BEFORE any prompt, to a path
-   *                   outside the sanctioned plan/project directories
-   *  - 'exited'     — claude process died before any of the above
-   *  - 'timeout'    — none of the above within budget
+   *                     outside the sanctioned plan/project directories
+   *  - 'exited'       — claude process died before any of the above
+   *  - 'timeout'      — none of the above within budget
    */
-  outcome: 'asked' | 'plan_ready' | 'silent_write' | 'exited' | 'timeout';
+  outcome: 'asked' | 'auto_decided' | 'plan_ready' | 'silent_write' | 'exited' | 'timeout';
   /** Human-readable summary. */
   summary: string;
   /** Visible terminal text since the slash command was sent (last 2KB). */
   evidence: string;
   /** Wall time (ms) until the outcome was decided. */
   elapsedMs: number;
+  /**
+   * Path to the plan file the skill wrote (if outcome is 'plan_ready').
+   * Extracted from the visible TTY via {@link extractPlanFilePath}. Lets the
+   * v1.22 AskUserQuestion-blocked regression tests verify the plan file
+   * contains a `## Decisions to confirm` section under --disallowedTools —
+   * a model that silently skips Step 0 reaches plan_ready WITHOUT writing
+   * the section, and that's the regression we want to catch.
+   */
+  planFile?: string;
 }
 
 /**
@@ -948,6 +1071,12 @@ export async function runPlanSkillObservation(opts: {
   cwd?: string;
   /** Total budget for skill to reach a terminal outcome. Default 180000. */
   timeoutMs?: number;
+  /** Extra CLI args appended after --permission-mode. Used by the v1.22+
+   *  AskUserQuestion-blocked regression tests to pass
+   *  `['--disallowedTools', 'AskUserQuestion']` (the flag set Conductor
+   *  uses to remove native AskUserQuestion in favor of its MCP variant).
+   *  Plumbs straight through to launchClaudePty. */
+  extraArgs?: string[];
   /**
    * Extra env merged into the spawned `claude` process. `launchClaudePty`
    * already supports this; exposing it here lets per-skill tests isolate
@@ -962,6 +1091,7 @@ export async function runPlanSkillObservation(opts: {
     permissionMode: opts.inPlanMode === false ? null : 'plan',
     cwd: opts.cwd,
     timeoutMs: (opts.timeoutMs ?? 180_000) + 30_000,
+    extraArgs: opts.extraArgs,
     env: opts.env,
   });
 
@@ -995,11 +1125,19 @@ export async function runPlanSkillObservation(opts: {
       }
       const classified = classifyVisible(visible);
       if (classified) {
-        return {
+        const obs: PlanSkillObservation = {
           ...classified,
           evidence: visible.slice(-2000),
           elapsedMs: Date.now() - startedAt,
         };
+        // For plan_ready outcomes, capture the plan file path from the full
+        // visible buffer — tests under --disallowedTools verify the file's
+        // contents to distinguish legitimate fallback flow from silent-skip.
+        if (classified.outcome === 'plan_ready') {
+          const planFile = extractPlanFilePath(visible);
+          if (planFile) obs.planFile = planFile;
+        }
+        return obs;
       }
     }
 
