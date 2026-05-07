@@ -1,5 +1,173 @@
 # Changelog
 
+## [1.27.0.0] - 2026-05-06
+
+## **`/setup-gbrain` connects to a remote brain in one paste. Brain repo renamed to gstack-artifacts.**
+
+`/setup-gbrain` now has a fourth path: paste a remote MCP URL plus a bearer
+token, and the skill registers it as your gbrain MCP without provisioning a
+local brain DB. No PGLite to install, no Supabase project to set up. Just
+point this Mac at a brain that already runs somewhere else (Tailscale node,
+ngrok endpoint, internal LAN, a teammate's server) and you have search +
+write working in one Claude Code session restart. The same flow optionally
+provisions a private `gstack-artifacts-$USER` repo on GitHub OR GitLab so
+the remote brain can ingest your CEO plans, designs, and reports as a
+federated source. The renamed repo replaces `gstack-brain-$USER` with a
+clearer name; existing users get a journaled, interruption-safe migration
+that handles the GitHub repo rename, the on-disk file moves, the config
+key rewrite, and the gbrain federated-source swap (add-new-before-remove-old,
+no downtime window).
+
+### The numbers that matter
+
+Verified end-to-end against a live remote brain (wintermute on Tailscale,
+gbrain v0.27.1, 96K pages) plus the new test suite:
+
+| Surface | Before | After | Δ |
+|---|---|---|---|
+| `/setup-gbrain` paths | 3 (Supabase / PGLite / Switch) | 4 (Supabase / PGLite / Switch / Remote MCP) | +1 path, no local install required |
+| Time to working remote MCP | manual `claude mcp add --transport http`, then skip the rest of the skill | one Path 4 walkthrough, full verify + artifact-repo provision | ~30 sec setup, agent guided |
+| Verify failure modes classified | none (raw curl error) | NETWORK / AUTH / MALFORMED, each with one-line remediation hint | 3 buckets, 0 wrong-layer debugging |
+| Migration interruption safety | partial-state on Ctrl-C | journal at `.migrations/v1.27.0.0.journal`, resumes from the next un-done step | 6-step atomic rollback |
+| Rename blast radius | one bin script | bin + scripts/ + 8 generated SKILL.md surfaces | grep regression test guards every caller |
+| Tests added | — | 59 unit + 2 gate-tier E2E + 4 regression | full coverage of the rename + Path 4 prose contract |
+
+| Path 4 step | What runs | Local dependency |
+|---|---|---|
+| Step 4c verify | `gstack-gbrain-mcp-verify $URL` (curl POST initialize) | none |
+| Step 5a register | `claude mcp add --scope user --transport http gbrain $URL --header "Authorization: Bearer $TOKEN"` | claude CLI |
+| Step 7 artifacts | `gstack-artifacts-init` (gh OR glab OR manual URL paste) | gh / glab / git |
+| Step 8 CLAUDE.md | mode-aware block; token NEVER written to CLAUDE.md (only `~/.claude.json`) | filesystem |
+| Step 9 smoke test | prints curl-equivalent for post-restart manual verification | none |
+
+The verify helper's `Accept: application/json, text/event-stream` requirement
+is a regression-tested invariant. Every MCP server that ships HTTP transport
+returns 406 Not Acceptable without both values; missing this header costs
+about 10 minutes of debugging per fresh setup.
+
+### What this means for users running gbrain across machines
+
+If you have a brain on a different Mac, a Tailscale-connected server, or a
+teammate runs one for the team, you no longer need a local install on every
+client. One paste of URL + bearer registers the MCP at user scope; restart
+Claude Code and `mcp__gbrain__search` and friends become callable. The
+artifacts repo is per-user (private), so each developer pushes their own
+plans/designs/reports without crossing trust surfaces. Renaming
+`gstack-brain-$USER` to `gstack-artifacts-$USER` is automatic if you accept
+the migration prompt; everything keeps working if you decline.
+
+Existing local-mode users (PGLite or Supabase) see no behavior change beyond
+the rename. The path you picked in `/setup-gbrain` Step 2 still runs end to
+end, just under the new "artifacts" terminology.
+
+### Itemized changes
+
+#### Added
+
+- **`/setup-gbrain` Path 4 (Remote MCP).** Step 2 gains a fourth option:
+  paste an HTTPS MCP URL plus a bearer token. The skill verifies via
+  `gstack-gbrain-mcp-verify` (NETWORK / AUTH / MALFORMED classifier with
+  one-line remediation hints), registers via `claude mcp add --scope user
+  --transport http gbrain --header "Authorization: Bearer ..."`, then
+  skips local install / doctor / transcript ingest because Path 4 has
+  no local dependencies. Steps 5, 5a, 7, 8, 9, 10 all branch on mode.
+  Idempotent re-run skips Step 2 entirely when `gbrain_mcp_mode=remote-http`
+  is already detected.
+- **`bin/gstack-gbrain-mcp-verify`** (new). POSTs `initialize` to a remote
+  MCP URL with the bearer from `$GBRAIN_MCP_TOKEN` (never argv) and
+  classifies failures into NETWORK / AUTH / MALFORMED with concrete
+  remediation hints. Probes `tools/list` for forward-compat with future
+  gbrain releases that ship `mcp__gbrain__sources_add` (returns
+  `sources_add_url_supported: true|false`).
+- **`bin/gstack-artifacts-init`** (new). Replaces `gstack-brain-init`. Asks
+  the user to pick GitHub (auto via `gh`), GitLab (auto via `glab`), or
+  manual URL paste. Creates `gstack-artifacts-$USER` (private), stores the
+  HTTPS URL canonically in `~/.gstack-artifacts-remote.txt`, and prints the
+  brain-admin hookup command labeled "Send this to your brain admin" (always
+  prints, never auto-executes — see `setup-gbrain/memory.md` for why).
+- **`bin/gstack-artifacts-url`** (new). Small helper for HTTPS↔SSH
+  conversion plus host / owner-repo extraction. Mirrors the spirit of
+  `gstack-slug` so URL-format string-mangling lives in one place.
+- **`gbrain_mcp_mode` field in `gstack-gbrain-detect` output.** 3-tier
+  fallback: `claude mcp get gbrain --json` → `claude mcp list` text-grep →
+  `~/.claude.json` jq read. Defense in depth: if Anthropic moves the file
+  format, the first two tiers absorb it.
+- **`gstack-upgrade/migrations/v1.27.0.0.sh`**. Six-step journaled migration
+  for the brain → artifacts rename. Each step writes its name to
+  `~/.gstack/.migrations/v1.27.0.0.journal` on success; re-entry resumes
+  from the next un-done step. On final success, journal is replaced by
+  `v1.27.0.0.done`. User opt-out writes a `skipped-by-user` marker so the
+  prompt doesn't fire again until `/setup-gbrain --rerun-migration`.
+- **`setup-gbrain/memory.md`** has a new "Path 4: Remote MCP setup"
+  section covering the bearer storage trade-off, the always-print
+  brain-admin hookup pattern, the CLAUDE.md block format (no token), and
+  token-rotation guidance.
+
+#### Changed
+
+- **`gbrain_sync_mode` config key renamed to `artifacts_sync_mode`.** Hard
+  rename, no dual-read alias. The migration script rewrites the key in
+  `~/.gstack/config.yaml` and any "## GBrain Configuration" block in
+  CLAUDE.md. Internal callers updated:
+  `bin/gstack-config`, `bin/gstack-gbrain-detect`, `bin/gstack-brain-sync`,
+  `bin/gstack-brain-enqueue`, `bin/gstack-brain-uninstall`,
+  `bin/gstack-timeline-log`, `scripts/resolvers/preamble/generate-brain-sync-block.ts`.
+- **Preamble `BRAIN_SYNC: ...` line renamed to `ARTIFACTS_SYNC: ...`** and
+  branches on `gbrain_mcp_mode`. In remote-http mode it emits
+  `ARTIFACTS_SYNC: remote-mode (managed by brain server <host>)` to make
+  clear that local sync is a no-op by design.
+- **`bin/gstack-brain-restore`, `bin/gstack-gbrain-source-wireup`, and
+  `bin/gstack-brain-uninstall`** read `~/.gstack-artifacts-remote.txt` with
+  `~/.gstack-brain-remote.txt` as a migration-window fallback. Once the
+  v1.27.0.0 migration runs, only the artifacts file remains.
+- **`/sync-gbrain` is a graceful no-op in remote-http mode** (V1). Prints a
+  one-line note pointing at the brain server and exits cleanly. Local-mode
+  users see no change.
+
+#### Removed
+
+- **`bin/gstack-brain-init` deleted.** Replaced by `bin/gstack-artifacts-init`.
+  Anyone running the old name post-upgrade gets a clean "command not found"
+  rather than a silent rename — per the gstack rule "avoid backwards-
+  compatibility hacks." Existing users on disk have their state migrated by
+  v1.27.0.0.sh.
+- **`test/gstack-brain-init-gh-mock.test.ts` deleted.** Replaced by
+  `test/gstack-artifacts-init.test.ts` covering the same gh-mock pattern
+  plus the new GitLab branch and the brain-admin printout.
+
+#### For contributors
+
+- **59 new unit tests + 2 gate-tier E2E tests + 4 regression tests.**
+  Highlights:
+  - `test/gstack-gbrain-mcp-verify.test.ts` (13 tests) covers each error
+    class via mocked curl, asserts the dual `Accept` header is set on
+    every call, regression-tests the token-never-on-stdout invariant.
+  - `test/gstack-artifacts-init.test.ts` (16 tests) covers gh / glab /
+    both / neither provider selection, HTTPS canonical storage, the
+    URL-form-supported branch in the brain-admin printout, and idempotent
+    re-run.
+  - `test/gstack-gbrain-detect-mcp-mode.test.ts` (19 tests) verifies each
+    of the 3 detection tiers in isolation, plus the schema-regression
+    check that `/sync-gbrain`'s parser doesn't break on the new fields.
+  - `test/migrations-v1.27.0.0.test.ts` (11 tests) covers all six
+    migration steps including journal-resume, idempotent re-run, the
+    add-before-remove ordering for source swap, and the remote-MCP
+    print-only branch.
+  - `test/no-stale-gstack-brain-refs.test.ts` greps the broader tree
+    (bin, scripts, *.tmpl, generated *.md, test/) for stale identifiers.
+  - `test/post-rename-doc-regen.test.ts` confirms gen-skill-docs output
+    has no `gstack-brain` strings post-rename.
+  - `test/setup-gbrain-path4-structure.test.ts` is a fast structural lint
+    that catches AUQ-pacing regressions in the Path 4 prose without
+    spending eval tokens.
+- **`scripts/resolvers/preamble/generate-brain-sync-block.ts`** detects
+  remote-http mode by reading `~/.claude.json` directly (no claude
+  subprocess on every preamble — the hot path stays fast).
+- **`test/helpers/touchfiles.ts`** wires `setup-gbrain-remote` and
+  `setup-gbrain-bad-token` into the gate-tier E2E selection.
+- **Preamble byte budget ratcheted from 35K to 36.5K** to honor the
+  remote-mode probe in `generate-brain-sync-block.ts`.
+
 ## [1.26.5.0] - 2026-05-06
 
 ## **The v1.26 memory feature now actually works on a fresh `/setup-gbrain` install, and `/sync-gbrain --full` actually registers github-hosted code sources.**

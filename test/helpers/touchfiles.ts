@@ -133,7 +133,14 @@ export const E2E_TOUCHFILES: Record<string, string[]> = {
   'plan-eng-finding-count':      ['plan-eng-review/**', 'scripts/resolvers/preamble.ts', 'scripts/resolvers/preamble/generate-ask-user-format.ts', 'scripts/resolvers/preamble/generate-completion-status.ts', 'test/helpers/claude-pty-runner.ts', 'test/skill-e2e-plan-eng-finding-count.test.ts'],
   'plan-design-finding-count':   ['plan-design-review/**', 'scripts/resolvers/preamble.ts', 'scripts/resolvers/preamble/generate-ask-user-format.ts', 'scripts/resolvers/preamble/generate-completion-status.ts', 'test/helpers/claude-pty-runner.ts', 'test/skill-e2e-plan-design-finding-count.test.ts'],
   'plan-devex-finding-count':    ['plan-devex-review/**', 'scripts/resolvers/preamble.ts', 'scripts/resolvers/preamble/generate-ask-user-format.ts', 'scripts/resolvers/preamble/generate-completion-status.ts', 'test/helpers/claude-pty-runner.ts', 'test/skill-e2e-plan-devex-finding-count.test.ts'],
-  'brain-privacy-gate':           ['scripts/resolvers/preamble/generate-brain-sync-block.ts', 'scripts/resolvers/preamble.ts', 'bin/gstack-brain-sync', 'bin/gstack-brain-init', 'bin/gstack-config', 'test/helpers/agent-sdk-runner.ts'],
+  'brain-privacy-gate':           ['scripts/resolvers/preamble/generate-brain-sync-block.ts', 'scripts/resolvers/preamble.ts', 'bin/gstack-brain-sync', 'bin/gstack-artifacts-init', 'bin/gstack-config', 'test/helpers/agent-sdk-runner.ts'],
+
+  // /setup-gbrain Path 4 (Remote MCP) — happy + bad-token end-to-end via
+  // Agent SDK. Gate-tier (deterministic stub server, fixed inputs); fires
+  // when the skill template, the verify helper, the artifacts-init helper,
+  // or the detect script changes.
+  'setup-gbrain-remote':          ['setup-gbrain/SKILL.md.tmpl', 'bin/gstack-gbrain-mcp-verify', 'bin/gstack-artifacts-init', 'bin/gstack-gbrain-detect', 'test/helpers/agent-sdk-runner.ts'],
+  'setup-gbrain-bad-token':       ['setup-gbrain/SKILL.md.tmpl', 'bin/gstack-gbrain-mcp-verify', 'test/helpers/agent-sdk-runner.ts'],
 
   // AskUserQuestion format regression (RECOMMENDATION + Completeness: N/10)
   // Fires when either template OR the two preamble resolvers change.
@@ -426,6 +433,16 @@ export const E2E_TIERS: Record<string, 'gate' | 'periodic'> = {
   // Privacy gate for gstack-brain-sync — periodic (non-deterministic LLM call,
   // costs ~$0.30-$0.50 per run, not needed on every commit)
   'brain-privacy-gate': 'periodic',
+
+  // /setup-gbrain Path 4 (Remote MCP) — periodic-tier. The stub HTTP
+  // server is deterministic but the model's interpretation of "follow
+  // Path 4 only" is not — assertions on which steps the model ran are
+  // flaky. The deterministic gate-tier coverage for Path 4 lives in
+  // test/setup-gbrain-path4-structure.test.ts (free, <200ms). These
+  // E2E tests stay available for on-demand verification of the live
+  // model's behavior against a stub MCP server.
+  'setup-gbrain-remote': 'periodic',
+  'setup-gbrain-bad-token': 'periodic',
 
   // AskUserQuestion format regression — periodic (Opus 4.7 non-deterministic benchmark)
   'plan-ceo-review-format-mode': 'periodic',
