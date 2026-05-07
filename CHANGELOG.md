@@ -1,5 +1,85 @@
 # Changelog
 
+## [1.27.1.0] - 2026-05-06
+
+## **Plan-mode reviews now refuse to dump findings without asking. Four gate-tier tests catch the regression on every PR.**
+
+The four `/plan-*-review` skills (eng, ceo, design, devex) gain an
+anti-shortcut clause baked in via a single shared resolver. The clause
+names the May 2026 transcript-bug failure mode directly: model explores,
+finds issues, dumps every finding into one plan write, calls
+ExitPlanMode without firing AskUserQuestion. The new clause closes that
+loophole: "the plan file is the OUTPUT of the interactive review, not a
+substitute for it." Future tightening edits one resolver, all four
+skills update on the next gen-skill-docs.
+
+Four gate-tier E2E tests catch the regression class on every PR that
+touches the four templates, the shared resolver, or the seeds fixture.
+Each test drives the matching skill against a small "forcing finding"
+seed and asserts the agent fires at least one AskUserQuestion before
+reaching plan_ready. ~1-3 min wall time per test, ~$2-6 total per CI
+hit. Eng floor: 59s. CEO floor: 197s. All four pass against the new
+template.
+
+### The numbers that matter
+
+Verified end-to-end via live PTY runs against `claude` plan mode:
+
+| Surface | Before | After | Δ |
+|---|---|---|---|
+| Plan-mode reviews with anti-shortcut clause | 0/4 | 4/4 | full coverage of plan-* family |
+| Gate-tier regression tests for the transcript-bug class | 0 | 4 | one per skill |
+| Wall time per floor test (typical) | n/a | 30s-3m | early exit on first AUQ render |
+| Cost per gate run (when triggered) | n/a | ~$2-6 | diff-gated; only fires on relevant edits |
+| Lines added / deleted | — | +450 / −3 | additive; no breaking changes |
+
+The floor tests use a focused observer (`runPlanSkillFloorCheck`) that
+exits at the first non-permission numbered-option render. Existing
+periodic finding-count tests use `runPlanSkillCounting` for full
+fingerprint analysis on a 25-min budget; the floor variant trades
+fingerprint precision for early-exit reliability so it fits gate-tier
+constraints. Both helpers live side-by-side in
+`test/helpers/claude-pty-runner.ts`.
+
+### What this means for the four review skills
+
+Every plan-* review now has a structural rule against the precise
+failure mode the transcript exhibited. The anti-shortcut clause
+appears in the rendered prompt right after the existing Anti-skip
+rule, so it's read alongside the per-section STOP gates v1.26.2.0
+already added. If a future model regression revives the bug, the
+gate-tier floor test fires with full PTY evidence on the next PR.
+
+### Itemized changes
+
+#### Added
+- **`generateAntiShortcutClause` resolver** in `scripts/resolvers/review.ts`,
+  registered as `{{ANTI_SHORTCUT_CLAUSE}}` in the `RESOLVERS` map.
+  Plan-* SKILL.md.tmpl files include it via one placeholder line.
+- **`runPlanSkillFloorCheck` PTY helper** in
+  `test/helpers/claude-pty-runner.ts` — minimal "did the agent fire ANY
+  AskUserQuestion?" observer with early exit on first non-permission
+  numbered-option render.
+- **Four gate-tier finding-floor E2E tests** in
+  `test/skill-e2e-plan-{eng,ceo,design,devex}-finding-floor.test.ts`,
+  each using the shared `runPlanSkillFloorCheck` helper.
+- **Four forcing-finding seeds** in `test/fixtures/forcing-finding-seeds.ts`,
+  one per skill, each engineered to surface at least one finding under
+  that skill's review focus.
+
+#### Changed
+- **All four `plan-*-review` SKILL.md** files now include the
+  anti-shortcut clause immediately after the `**Anti-skip rule:**`
+  paragraph. Anchored on the paragraph (not the surrounding heading)
+  so the same insertion works across all four templates regardless of
+  their differing section labels.
+- **`test/helpers/touchfiles.ts`** adds 4 entries to `E2E_TOUCHFILES`
+  and `E2E_TIERS=gate`. The new entries depend on the matching skill
+  template, the shared resolver, the seeds fixture, and the PTY
+  runner helper.
+- **`test/touchfiles.test.ts`** count assertion bumped 21→22 with
+  explicit `plan-ceo-finding-floor` containment.
+
 ## [1.27.0.0] - 2026-05-06
 
 ## **`/setup-gbrain` connects to a remote brain in one paste. Brain repo renamed to gstack-artifacts.**
