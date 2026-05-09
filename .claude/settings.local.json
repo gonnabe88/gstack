@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git filter-branch *)",
+      "Bash(git stash *)",
+      "Bash(FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --force --index-filter \"git rm --cached --ignore-unmatch bin/gstack-global-discover.exe\" --prune-empty HEAD)",
+      "Bash(git checkout *)",
+      "Bash(git push *)",
+      "Bash(git update-ref *)",
+      "Bash(git reflog *)",
+      "Bash(git gc *)"
+    ]
+  }
+}
