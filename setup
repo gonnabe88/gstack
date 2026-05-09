@@ -3,6 +3,13 @@
 set -e
 umask 077  # Restrict new files to owner-only (0o600 files, 0o700 dirs)
 
+# On Windows (MSYS2/Git Bash invoked from PowerShell), the inherited PATH may have
+# WSL bash.exe (C:\Windows\System32\bash.exe) before Git Bash's /usr/bin/bash.
+# Prepend MSYS2 bin dirs so that 'bash' and other tools resolve to Git Bash, not WSL.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) export PATH="/usr/local/bin:/usr/bin:/bin:$PATH" ;;
+esac
+
 if ! command -v bun >/dev/null 2>&1; then
   echo "Error: bun is required but not installed." >&2
   echo "Install with checksum verification:" >&2
@@ -17,7 +24,6 @@ fi
 INSTALL_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd)"
 SOURCE_GSTACK_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 INSTALL_SKILLS_DIR="$(dirname "$INSTALL_GSTACK_DIR")"
-BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse"
 CODEX_SKILLS="$HOME/.codex/skills"
 CODEX_GSTACK="$CODEX_SKILLS/gstack"
 FACTORY_SKILLS="$HOME/.factory/skills"
@@ -29,6 +35,12 @@ IS_WINDOWS=0
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT) IS_WINDOWS=1 ;;
 esac
+
+if [ "$IS_WINDOWS" -eq 1 ]; then
+  BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse.exe"
+else
+  BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse"
+fi
 
 # ─── Quiet mode helper ────────────────────────────────────────
 QUIET=0
@@ -197,7 +209,11 @@ migrate_direct_codex_install() {
   SOURCE_GSTACK_DIR="$migrated_dir"
   INSTALL_GSTACK_DIR="$migrated_dir"
   INSTALL_SKILLS_DIR="$(dirname "$INSTALL_GSTACK_DIR")"
-  BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse"
+  if [ "$IS_WINDOWS" -eq 1 ]; then
+    BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse.exe"
+  else
+    BROWSE_BIN="$SOURCE_GSTACK_DIR/browse/dist/browse"
+  fi
 }
 
 if [ "$INSTALL_CODEX" -eq 1 ]; then
